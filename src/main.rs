@@ -5,6 +5,8 @@ use dotenv::dotenv;
 
 use crate::ai::{AIConfig, AIResponseGenerator};
 use crate::api::ApiClient;
+#[allow(unused_imports)]
+use crate::api::AppStoreRelease;
 use crate::review::Review;
 
 mod ai;
@@ -19,6 +21,48 @@ use ui::ReviewUI;
 async fn main() -> Result<()> {
     // Load .env file if it exists (ignore errors if file doesn't exist)
     dotenv().ok();
+
+    // List iOS App Store releases with --list-releases
+    if std::env::args().any(|arg| arg == "--list-releases") {
+        let matches = Command::new("rustpond")
+            .arg(Arg::new("list-releases").long("list-releases").action(clap::ArgAction::SetTrue))
+            .arg(Arg::new("ios").long("ios").action(clap::ArgAction::SetTrue))
+            .arg(Arg::new("android").long("android").action(clap::ArgAction::SetTrue))
+            .arg(Arg::new("app-id").long("app-id").value_name("APP_ID"))
+            .arg(Arg::new("key-id").long("key-id").value_name("KEY_ID"))
+            .arg(Arg::new("issuer-id").long("issuer-id").value_name("ISSUER_ID"))
+            .arg(Arg::new("private-key").long("private-key").value_name("PRIVATE_KEY_PATH"))
+            .get_matches();
+
+        let config = config::Config::from_args_and_env(&matches)?;
+        let mut client = ApiClient::new(config);
+        match client.list_releases().await {
+            Ok(releases) => {
+                println!("# App Store Releases ({} total)\n", releases.len());
+                for r in &releases {
+                    println!("## Version {}", r.version_string);
+                    println!("- Created: {}", r.created_date);
+                    println!("- Release type: {}", r.release_type);
+                    println!("- State: {}", r.app_store_state);
+                    if r.notes_by_locale.is_empty() {
+                        println!("- (no localized release notes found)");
+                    } else {
+                        println!("### Release notes");
+                        for (locale, notes) in &r.notes_by_locale {
+                            let trimmed = notes.trim();
+                            if trimmed.is_empty() {
+                                continue;
+                            }
+                            println!("\n**{}**\n\n{}", locale, trimmed);
+                        }
+                    }
+                    println!();
+                }
+            }
+            Err(e) => eprintln!("Error listing releases: {}", e),
+        }
+        return Ok(());
+    }
 
     // Test Google Play API access with --test-android flag
     if std::env::args().any(|arg| arg == "--test-android") {

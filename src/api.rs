@@ -104,6 +104,15 @@ impl ApiClient {
             Self::GooglePlay(client) => client.refresh_all_reviews().await,
         }
     }
+
+    pub async fn list_releases(&mut self) -> Result<Vec<AppStoreRelease>> {
+        match self {
+            Self::AppStore(client) => client.list_releases().await,
+            Self::GooglePlay(_) => Err(anyhow!(
+                "--list-releases is only supported on iOS. Google Play's API does not expose historical release notes."
+            )),
+        }
+    }
 }
 
 impl AppStoreConnectClient {
@@ -491,6 +500,156 @@ impl AppStoreConnectClient {
 
         Err(anyhow!("Invalid response data format"))
     }
+
+    pub async fn list_releases(&mut self) -> Result<Vec<AppStoreRelease>> {
+        self.ensure_valid_token().await?;
+        let token = self.jwt_token.as_ref().unwrap().clone();
+
+        let mut releases: Vec<AppStoreRelease> = Vec::new();
+        let mut next_url: Option<String> = Some(format!(
+            "{}/apps/{}/appStoreVersions?filter[platform]=IOS&filter[appStoreState]=READY_FOR_SALE&limit=200",
+            APP_STORE_CONNECT_API_BASE, self.config.app_id
+        ));
+
+        while let Some(url) = next_url.take() {
+            let response = self
+                .client
+                .get(&url)
+                .bearer_auth(&token)
+                .send()
+                .await
+                .map_err(|e| anyhow!("Failed to fetch versions: {}", e))?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let error_text = response.text().await.unwrap_or_default();
+                return Err(anyhow!(
+                    "Versions request failed with status {}: {}",
+                    status,
+                    error_text
+                ));
+            }
+
+            let body: serde_json::Value = response
+                .json()
+                .await
+                .map_err(|e| anyhow!("Failed to parse versions response: {}", e))?;
+
+            if let Some(items) = body.get("data").and_then(|d| d.as_array()) {
+                for item in items {
+                    let version_id = item
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let attrs = item.get("attributes").cloned().unwrap_or(serde_json::Value::Null);
+                    let version_string = attrs
+                        .get("versionString")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let created_date = attrs
+                        .get("createdDate")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let release_type = attrs
+                        .get("releaseType")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let app_store_state = attrs
+                        .get("appStoreState")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+
+                    let notes_by_locale = self.fetch_version_localizations(&token, &version_id).await?;
+
+                    releases.push(AppStoreRelease {
+                        version_string,
+                        created_date,
+                        release_type,
+                        app_store_state,
+                        notes_by_locale,
+                    });
+                }
+            }
+
+            next_url = body
+                .get("links")
+                .and_then(|l| l.get("next"))
+                .and_then(|n| n.as_str())
+                .map(|s| s.to_string());
+        }
+
+        Ok(releases)
+    }
+
+    async fn fetch_version_localizations(
+        &self,
+        token: &str,
+        version_id: &str,
+    ) -> Result<Vec<(String, String)>> {
+        let url = format!(
+            "{}/appStoreVersions/{}/appStoreVersionLocalizations?limit=200",
+            APP_STORE_CONNECT_API_BASE, version_id
+        );
+
+        let response = self
+            .client
+            .get(&url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| anyhow!("Failed to fetch localizations: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Localizations request failed with status {}: {}",
+                status,
+                error_text
+            ));
+        }
+
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| anyhow!("Failed to parse localizations response: {}", e))?;
+
+        let mut out: Vec<(String, String)> = Vec::new();
+        if let Some(items) = body.get("data").and_then(|d| d.as_array()) {
+            for item in items {
+                let attrs = match item.get("attributes") {
+                    Some(a) => a,
+                    None => continue,
+                };
+                let locale = attrs
+                    .get("locale")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let whats_new = attrs
+                    .get("whatsNew")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                out.push((locale, whats_new));
+            }
+        }
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AppStoreRelease {
+    pub version_string: String,
+    pub created_date: String,
+    pub release_type: String,
+    pub app_store_state: String,
+    pub notes_by_locale: Vec<(String, String)>,
 }
 
 impl GooglePlayClient {
