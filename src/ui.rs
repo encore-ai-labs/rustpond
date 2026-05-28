@@ -74,41 +74,53 @@ impl ReviewUI {
     }
 
     fn find_next_word_boundary(&self) -> usize {
-        let chars: Vec<char> = self.response_text.chars().collect();
-        let mut pos = self.cursor_position;
-        
+        let s = &self.response_text;
+        let mut pos = self.cursor_position.min(s.len());
+
         // Skip current word (non-whitespace)
-        while pos < chars.len() && !chars[pos].is_whitespace() {
-            pos += 1;
+        while let Some(ch) = s[pos..].chars().next() {
+            if ch.is_whitespace() {
+                break;
+            }
+            pos += ch.len_utf8();
         }
-        
+
         // Skip whitespace to next word
-        while pos < chars.len() && chars[pos].is_whitespace() {
-            pos += 1;
+        while let Some(ch) = s[pos..].chars().next() {
+            if !ch.is_whitespace() {
+                break;
+            }
+            pos += ch.len_utf8();
         }
-        
+
         pos
     }
 
     fn find_prev_word_boundary(&self) -> usize {
-        let chars: Vec<char> = self.response_text.chars().collect();
-        if self.cursor_position == 0 {
+        let s = &self.response_text;
+        let cursor = self.cursor_position.min(s.len());
+        if cursor == 0 {
             return 0;
         }
-        
-        let mut pos = self.cursor_position - 1;
-        
+
+        let chars: Vec<(usize, char)> = s[..cursor].char_indices().collect();
+        if chars.is_empty() {
+            return 0;
+        }
+
+        let mut idx = chars.len() - 1;
+
         // Skip whitespace backwards
-        while pos > 0 && chars[pos].is_whitespace() {
-            pos -= 1;
+        while idx > 0 && chars[idx].1.is_whitespace() {
+            idx -= 1;
         }
-        
-        // Skip current word backwards
-        while pos > 0 && !chars[pos - 1].is_whitespace() {
-            pos -= 1;
+
+        // Walk back to the start of the current word
+        while idx > 0 && !chars[idx - 1].1.is_whitespace() {
+            idx -= 1;
         }
-        
-        pos
+
+        chars[idx].0
     }
 
     pub async fn new(config: Config) -> Result<Self> {
@@ -445,7 +457,11 @@ impl ReviewUI {
                             // Cmd+Left: Jump to beginning of line (treat as Home)
                             self.cursor_position = 0;
                         } else if self.cursor_position > 0 {
-                            self.cursor_position -= 1;
+                            self.cursor_position = self.response_text[..self.cursor_position]
+                                .char_indices()
+                                .last()
+                                .map(|(i, _)| i)
+                                .unwrap_or(0);
                         }
                     }
                     KeyCode::Right => {
@@ -456,7 +472,9 @@ impl ReviewUI {
                             // Cmd+Right: Jump to end of line (treat as End)
                             self.cursor_position = self.response_text.len();
                         } else if self.cursor_position < self.response_text.len() {
-                            self.cursor_position += 1;
+                            if let Some(ch) = self.response_text[self.cursor_position..].chars().next() {
+                                self.cursor_position += ch.len_utf8();
+                            }
                         }
                     }
                     KeyCode::Home => {
@@ -474,8 +492,13 @@ impl ReviewUI {
                                 self.cursor_position = word_start;
                             }
                         } else if self.cursor_position > 0 {
-                            self.cursor_position -= 1;
-                            self.response_text.remove(self.cursor_position);
+                            let new_pos = self.response_text[..self.cursor_position]
+                                .char_indices()
+                                .last()
+                                .map(|(i, _)| i)
+                                .unwrap_or(0);
+                            self.response_text.drain(new_pos..self.cursor_position);
+                            self.cursor_position = new_pos;
                         }
                     }
                     KeyCode::Delete => {
